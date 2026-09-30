@@ -2,6 +2,19 @@
 
 An MCP server that exposes [Connhex](https://connhex.com) APIs as tools.
 
+## Identity tools
+
+- `get_identity(identity_id)`: read a Connhex identity by UUID.
+- `list_identities(limit=10, offset=0, credentials_identifier=None)`: read a
+  page of identities, optionally matching an exact email or username.
+
+Both tools exclude credential information and use the existing authentication
+and tool filtering settings. The authenticated principal needs identity read
+permissions. List results include `identities`, `limit`, `offset`, `has_more`,
+and `next_offset`. Pass `next_offset` as `offset` to continue; no pagination cursor
+is exposed. High offsets require additional HTTP requests, and concurrent
+identity changes can affect pagination.
+
 ## Setup
 
 ### Remote MCP Server
