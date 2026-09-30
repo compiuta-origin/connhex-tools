@@ -2,6 +2,22 @@
 
 A command-line interface for [Connhex](https://connhex.com) that lets you manage connectables, things, models, resources, rules, and IoT messages from the terminal.
 
+## Identities
+
+```bash
+connhex-cli identities list --limit 20 --offset 0
+connhex-cli identities list --credentials-identifier user@example.com
+connhex-cli identities get identity-uuid
+connhex-cli --output table identities list --limit 20
+```
+
+Identity reads use the existing authentication configuration and require
+appropriate identity permissions. Credentials are excluded from all results.
+JSON lists include `identities`, `limit`, `offset`, `has_more`, and `next_offset`;
+use the returned `next_offset` with `--offset` to continue. Table output shows
+the identities and the next offset when more results exist. High offsets
+require additional API requests; concurrent changes can affect pagination.
+
 ## Installation
 
 ### With uv (recommended for development)

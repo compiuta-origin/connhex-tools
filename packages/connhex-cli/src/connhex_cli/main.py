@@ -4,11 +4,12 @@ from typing import Literal
 import click
 import httpx
 import typer
-from connhex.errors import ConnhexAPIError
+from connhex.errors import ConnhexAPIError, ConnhexError
 from typer.core import TyperGroup
 
 from connhex_cli import __version__
 from connhex_cli.commands.auth import auth_app
+from connhex_cli.commands.identities import identities_app
 from connhex_cli.commands.connectables import connectables_app
 from connhex_cli.commands.messages import messages_app
 from connhex_cli.commands.models import models_app
@@ -33,7 +34,7 @@ class ConnhexCLIGroup(TyperGroup):
     def invoke(self, ctx: click.Context):
         try:
             return super().invoke(ctx)
-        except (ConnhexAPIError, httpx.RequestError) as e:
+        except (ConnhexError, httpx.RequestError) as e:
             if ctx.params.get("debug"):
                 raise
             typer.echo(f"Error: {_format_cli_error(e)}", err=True)
@@ -47,6 +48,7 @@ app = typer.Typer(
 )
 
 app.add_typer(auth_app, name="auth")
+app.add_typer(identities_app, name="identities")
 app.add_typer(things_app, name="things")
 app.add_typer(models_app, name="models")
 app.add_typer(resources_app, name="resources")
