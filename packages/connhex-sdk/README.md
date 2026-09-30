@@ -33,3 +33,30 @@ with Connhex(
 ```
 
 Precedence is: explicit `instance_url`, then `CONNHEX_INSTANCE_URL`, then `https://connhex.com`.
+
+## Identities
+
+Both `AsyncConnhex` and `Connhex` expose Connhex identity reads through `iam`:
+
+```python
+async with AsyncConnhex(token="ory_st_...") as connhex:
+    identity = await connhex.iam.get_identity("identity-uuid")
+    page = await connhex.iam.list_identities(limit=20, offset=0)
+    if page.has_more:
+        next_page = await connhex.iam.list_identities(
+            limit=20, offset=page.next_offset
+        )
+    matches = await connhex.iam.list_identities(
+        credentials_identifier="user@example.com"
+    )
+```
+
+`IdentitiesPage` contains `identities`, `limit`, `offset`, `has_more`, and
+`next_offset` (null at the end). Credential information is excluded from
+both get and list results. Traits and metadata support tenant-specific schemas.
+The authenticated principal must have permission to read identities.
+
+Pagination cursors remain internal: each call scans from the first page, so high
+offsets require additional HTTP requests. Pagination is not a snapshot when
+identities change concurrently. Invalid payloads or pagination continuations
+raise `InvalidResponseError`; HTTP failures retain the SDK's usual errors.

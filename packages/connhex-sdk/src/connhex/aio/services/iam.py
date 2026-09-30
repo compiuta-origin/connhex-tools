@@ -1,9 +1,92 @@
+from urllib.parse import parse_qs, urlsplit
+
+from pydantic import TypeAdapter, ValidationError
+
 from connhex.aio._base_client import ConnhexClient
+from connhex.errors import InvalidResponseError
+from connhex.schemas.iam import IdentitiesPage, Identity
+
+_IDENTITIES = TypeAdapter(list[Identity])
 
 
 class IAMService:
     def __init__(self, client: ConnhexClient):
         self.client = client
+
+    async def get_identity(self, identity_id: str) -> Identity:
+        """Get a Connhex identity, excluding credential information."""
+        resp = await self.client.request(
+            "GET", f"/iam/identities/{identity_id}"
+        )
+        try:
+            return Identity.model_validate(resp.json())
+        except (ValueError, ValidationError) as exc:
+            raise InvalidResponseError("Invalid identity response") from exc
+
+    async def list_identities(
+        self,
+        *,
+        limit: int = 10,
+        offset: int = 0,
+        credentials_identifier: str | None = None,
+    ) -> IdentitiesPage:
+        """List Connhex identities with offset pagination and exact matching.
+
+        Pagination cursors are internal. Each call scans from the first page,
+        so larger offsets require more HTTP requests. Concurrent identity
+        changes may affect pagination; this is not a snapshot.
+        """
+        if limit <= 0 or offset < 0:
+            raise ValueError("limit must be positive and offset non-negative")
+
+        identities: list[Identity] = []
+        seen = 0
+        target = offset + limit + 1
+        token: str | None = None
+        visited: set[str] = set()
+        while seen < target:
+            params: dict = {"page_size": min(100, target - seen)}
+            if token is not None:
+                params["page_token"] = token
+            if credentials_identifier is not None:
+                params["credentials_identifier"] = credentials_identifier
+            resp = await self.client.request(
+                "GET", "/iam/identities", params=params
+            )
+            try:
+                page = _IDENTITIES.validate_python(resp.json())
+            except (ValueError, ValidationError) as exc:
+                raise InvalidResponseError(
+                    "Invalid identities response"
+                ) from exc
+            identities.extend(page[max(0, offset - seen) : target - seen])
+            seen += len(page)
+
+            next_link = resp.links.get("next")
+            if next_link is None:
+                break
+            tokens = parse_qs(urlsplit(next_link.get("url", "")).query).get(
+                "page_token", []
+            )
+            if len(tokens) != 1 or not tokens[0] or not page:
+                raise InvalidResponseError(
+                    "Invalid identities pagination continuation"
+                )
+            token = tokens[0]
+            if token in visited:
+                raise InvalidResponseError(
+                    "Repeated identities pagination cursor"
+                )
+            visited.add(token)
+
+        has_more = len(identities) > limit
+        return IdentitiesPage(
+            identities=identities[:limit],
+            limit=limit,
+            offset=offset,
+            has_more=has_more,
+            next_offset=offset + limit if has_more else None,
+        )
 
     async def whoami(self) -> dict:
         resp = await self.client.request(

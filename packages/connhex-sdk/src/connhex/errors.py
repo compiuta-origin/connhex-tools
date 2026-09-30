@@ -5,6 +5,10 @@ class ConnhexError(Exception):
     """Base class for Connhex SDK errors."""
 
 
+class InvalidResponseError(ConnhexError):
+    """The API returned an invalid payload or pagination continuation."""
+
+
 class ConnhexAPIError(ConnhexError):
     """Structured error from a Connhex API response."""
 
