@@ -67,7 +67,7 @@ async def get_rule(rule_id: Annotated[str, "Rule ID."]) -> Rule:
 @mcp.tool(
     title="Create Rule",
     annotations=ToolAnnotations(
-        readOnlyHint=False, destructiveHint=False, openWorldHint=False
+        readOnlyHint=False, destructiveHint=False, openWorldHint=True
     ),
 )
 async def create_rule(
@@ -106,7 +106,7 @@ async def create_rule(
 @mcp.tool(
     title="Update Rule",
     annotations=ToolAnnotations(
-        readOnlyHint=False, destructiveHint=False, openWorldHint=False
+        readOnlyHint=False, destructiveHint=True, openWorldHint=True
     ),
 )
 async def update_rule(
