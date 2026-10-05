@@ -1,22 +1,6 @@
 # Connhex CLI
 
-A command-line interface for [Connhex](https://connhex.com) that lets you manage connectables, things, models, resources, rules, and IoT messages from the terminal.
-
-## Identities
-
-```bash
-connhex-cli identities list --limit 20 --offset 0
-connhex-cli identities list --credentials-identifier user@example.com
-connhex-cli identities get identity-uuid
-connhex-cli --output table identities list --limit 20
-```
-
-Identity reads use the existing authentication configuration and require
-appropriate identity permissions. Credentials are excluded from all results.
-JSON lists include `identities`, `limit`, `offset`, `has_more`, and `next_offset`;
-use the returned `next_offset` with `--offset` to continue. Table output shows
-the identities and the next offset when more results exist. High offsets
-require additional API requests; concurrent changes can affect pagination.
+A command-line interface for [Connhex](https://connhex.com) that lets you read Connhex identities and manage connectables, things, models, resources, rules, and IoT messages from the terminal.
 
 ## Installation
 
@@ -98,18 +82,18 @@ connhex-cli [OPTIONS] COMMAND [ARGS]...
 
   --instance-url TEXT   Connhex instance URL  [env: CONNHEX_INSTANCE_URL]
   --token TEXT          Bearer token          [env: CONNHEX_BEARER_TOKEN]
-  --output, -o TEXT     Output format: table (default) or json
+  --output, -o TEXT     Output format: json (default) or table
   --log-config TEXT     Path to a JSON logging config file  [env: CONNHEX_LOG_CONFIG]
   --version             Print version and exit
 ```
 
 ## Output formats
 
-Default output is a Rich table (or panel for single objects). Add `--output json` (before the subcommand) for machine-readable JSON:
+Default output is machine-readable JSON. Add `--output table` (before the subcommand) for a Rich table (or panel for single objects):
 
 ```bash
-connhex-cli --output json things list --limit 5
-connhex-cli --output json things get <id>
+connhex-cli --output table things list --limit 5
+connhex-cli --output table things get <id>
 ```
 
 ## Commands
@@ -122,6 +106,34 @@ connhex-cli --output json things get <id>
 | `auth logout` | Delete cached credentials                |
 | `auth whoami` | Show current user info (network call)    |
 | `auth status` | Show cached credential info (local only) |
+
+### identities
+
+Read Connhex identities using the existing authentication configuration.
+
+| Command               | Description                                           |
+| --------------------- | ----------------------------------------------------- |
+| `identities list`     | List Connhex identities with filtering and pagination |
+| `identities get <id>` | Get a single Connhex identity by UUID                 |
+
+List options:
+
+```text
+--limit INTEGER                 Max identities to return (positive) [default: 50]
+--offset INTEGER                Identities to skip (non-negative)  [default: 0]
+--credentials-identifier TEXT   Exact credential identifier (email or username)
+```
+
+JSON lists include `identities`, `limit`, `offset`, `has_more`, and `next_offset`
+(`null` at the end). Use the returned `next_offset` with `--offset` to continue.
+Table output shows the identities and the next offset when more results exist.
+
+```bash
+connhex-cli identities list --limit 20 --offset 0
+connhex-cli identities list --credentials-identifier user@example.com
+connhex-cli identities get <identity-id>
+connhex-cli --output table identities list --limit 20
+```
 
 ### connectables
 
