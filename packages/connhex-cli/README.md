@@ -55,9 +55,9 @@ connhex-cli auth logout   # delete the cached credentials
 Pass a bearer token directly — no `login` required:
 
 ```bash
-connhex-cli --token ory_st_... things list
+connhex-cli --token YOUR_SESSION_TOKEN things list
 # or
-CONNHEX_BEARER_TOKEN=ory_st_... connhex-cli things list
+CONNHEX_BEARER_TOKEN=YOUR_SESSION_TOKEN connhex-cli things list
 ```
 
 When `--token` / `CONNHEX_BEARER_TOKEN` is set the credential store is ignored entirely.
@@ -263,7 +263,7 @@ connhex-cli resources list devices
 connhex-cli resources list batches --manufacturing
 
 # CI usage with a token (no login required)
-CONNHEX_BEARER_TOKEN=ory_st_... connhex-cli --output json things list
+CONNHEX_BEARER_TOKEN=YOUR_SESSION_TOKEN connhex-cli --output json things list
 
 # Bulk-register a batch of devices from a CSV
 connhex-cli connectables register ./fleet.csv

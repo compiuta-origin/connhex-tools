@@ -21,8 +21,8 @@ Connhex sessions so MCP clients can reuse their connection after a server
 restart or image update. Set `CONNHEX_OAUTH_CLIENT_STORE_PATH` to a SQLite file
 on a persistent volume, for example `/data/oauth-clients.sqlite`, and provide
 a stable Fernet key through `CONNHEX_OAUTH_SESSION_ENCRYPTION_KEY`. Configure
-`CONNHEX_KRATOS_ADMIN_URL` with the Kratos admin endpoint for automatic session
-extension. Login credentials are not stored.
+`CONNHEX_ACCOUNTS_ADMIN_URL` with the Connhex Accounts admin endpoint for
+automatic session extension. Login credentials are not stored.
 
 | Deployment                     | MCP server URL                                                                   | Authentication                         |
 | ------------------------------ | -------------------------------------------------------------------------------- | -------------------------------------- |
@@ -176,9 +176,8 @@ the `connhex-mcp` process:
 | Incoming `Authorization` header or `chx_auth_session` cookie | Used when the MCP transport forwards request headers.                        |
 
 Session-cookie authentication is sent directly to Connhex as
-`Cookie: chx_auth_session=<value>`; it does not require a Kratos JWT token
-template. Set `CONNHEX_SESSION_COOKIE` to the cookie value only, not a full
-`Cookie` header.
+`Cookie: chx_auth_session=<value>`. Set `CONNHEX_SESSION_COOKIE` to the cookie
+value only, not a full `Cookie` header.
 
 For sandboxed or browserless environments, use token-based auth with the local
 stdio server:

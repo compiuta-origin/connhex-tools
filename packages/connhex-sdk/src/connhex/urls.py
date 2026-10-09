@@ -63,7 +63,7 @@ def build_accounts_url(instance_url: str) -> str:
     """Return the ``accounts.<host>`` URL for a Connhex instance.
 
     This is where identity and auth flows live: login, password reset,
-    OAuth authorization, and the Kratos endpoints behind them. Use it to
+    OAuth authorization, and session management. Use it to
     build browser redirects or to drive custom auth flows that the SDK's
     bearer-token model does not cover.
     """

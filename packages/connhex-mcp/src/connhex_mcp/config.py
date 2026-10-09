@@ -46,9 +46,9 @@ class MCPSettings(BaseSettings):
         repr=False,
         description="Stable Fernet key for encrypted remote OAuth sessions.",
     )
-    kratos_admin_url: HttpUrl | None = Field(
+    accounts_admin_url: HttpUrl | None = Field(
         default=None,
-        description="Internal Kratos admin URL for preventive session extension.",
+        description="Internal Connhex Accounts admin URL for preventive session extension.",
     )
     openai_apps_challenge_token: str | None = Field(
         default=None,

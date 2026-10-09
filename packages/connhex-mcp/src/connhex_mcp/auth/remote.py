@@ -69,7 +69,7 @@ class PendingAuthorization:
 
 
 @dataclass(frozen=True)
-class KratosSession:
+class AccountsSession:
     session_id: str
     identity_id: str
     expires_at: float
@@ -100,8 +100,8 @@ class ConnhexOAuthProvider(OAuthProvider):
             raise ValueError("CONNHEX_OAUTH_CLIENT_STORE_PATH is required")
         if not settings.oauth_session_encryption_key:
             raise ValueError("CONNHEX_OAUTH_SESSION_ENCRYPTION_KEY is required")
-        if not settings.kratos_admin_url:
-            raise ValueError("CONNHEX_KRATOS_ADMIN_URL is required")
+        if not settings.accounts_admin_url:
+            raise ValueError("CONNHEX_ACCOUNTS_ADMIN_URL is required")
         self._store: OAuthConnectionStore = SQLiteOAuthConnectionStore(
             settings.oauth_client_store_path,
             settings.oauth_session_encryption_key,
@@ -159,18 +159,18 @@ class ConnhexOAuthProvider(OAuthProvider):
         client: OAuthClientInformationFull,
         authorization_code: AuthorizationCode,
     ) -> OAuthToken:
-        """Exchange an authorization code for the ory_st_* session token."""
+        """Exchange an authorization code for a Connhex Accounts session token."""
         code_str = authorization_code.code
-        ory_token = self._code_tokens.pop(code_str, None)
+        session_token = self._code_tokens.pop(code_str, None)
         self._auth_codes.pop(code_str, None)
 
-        if not ory_token:
+        if not session_token:
             raise TokenError(
                 error="invalid_grant",
                 error_description="Authorization code not found or expired",
             )
 
-        session = await self._get_session(ory_token)
+        session = await self._get_session(session_token)
         if session is None:
             raise TokenError(
                 error="invalid_grant",
@@ -178,7 +178,7 @@ class ConnhexOAuthProvider(OAuthProvider):
             )
         self._store.put_connection(
             OAuthConnection(
-                token=ory_token,
+                token=session_token,
                 session_id=session.session_id,
                 identity_id=session.identity_id,
                 client_id=client.client_id or "",
@@ -187,10 +187,10 @@ class ConnhexOAuthProvider(OAuthProvider):
             )
         )
         logger.info("Token exchange complete for client %s", client.client_id)
-        return OAuthToken(access_token=ory_token, token_type="Bearer")
+        return OAuthToken(access_token=session_token, token_type="Bearer")
 
     async def load_access_token(self, token: str) -> AccessToken | None:
-        """Load local ownership for revocation, even during a Kratos outage."""
+        """Load local ownership for revocation, even during an Accounts outage."""
         record = self._get_active_connection(token)
         if record is None:
             return None
@@ -202,7 +202,7 @@ class ConnhexOAuthProvider(OAuthProvider):
         )
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        """Only accept managed sessions; cache Kratos validation for <=60s."""
+        """Only accept managed sessions; cache Accounts validation for <=60s."""
         record = self._get_active_connection(token)
         if record is None:
             return None
@@ -351,7 +351,7 @@ class ConnhexOAuthProvider(OAuthProvider):
 
     async def _validate_connection(
         self, record: OAuthConnection
-    ) -> KratosSession | None:
+    ) -> AccountsSession | None:
         """Validate identity/session binding without undoing a concurrent revoke."""
         session = await self._get_session(record.token)
         if (
@@ -371,7 +371,7 @@ class ConnhexOAuthProvider(OAuthProvider):
     async def _extend_session(self, session_id: str) -> bool:
         """PATCH the internal admin endpoint; report definitive disappearance."""
         url = (
-            str(self.settings.kratos_admin_url).rstrip("/")
+            str(self.settings.accounts_admin_url).rstrip("/")
             + f"/admin/sessions/{session_id}/extend"
         )
         async with httpx.AsyncClient(timeout=PASSWORD_LOGIN_TIMEOUT) as client:
@@ -537,7 +537,7 @@ class ConnhexOAuthProvider(OAuthProvider):
         return HTMLResponse(content=render_login_page(flow_id), status_code=200)
 
     async def _handle_login_submit(self, request: Request) -> Response:
-        """Process login credentials via Kratos and redirect with code."""
+        """Process login credentials via Connhex Accounts and redirect with code."""
         form = await request.form()
         flow_id = str(form.get("flow_id", ""))
         identifier = str(form.get("identifier", ""))
@@ -564,7 +564,7 @@ class ConnhexOAuthProvider(OAuthProvider):
             )
 
         try:
-            ory_token = await password_login(
+            session_token = await password_login(
                 str(self.settings.instance_url), identifier, password
             )
             del password
@@ -604,7 +604,7 @@ class ConnhexOAuthProvider(OAuthProvider):
                 params.redirect_uri_provided_explicitly
             ),
         )
-        self._code_tokens[code] = ory_token
+        self._code_tokens[code] = session_token
 
         # Clean up the pending flow
         self._pending_flows.pop(flow_id, None)
@@ -620,8 +620,8 @@ class ConnhexOAuthProvider(OAuthProvider):
             headers={"Location": location},
         )
 
-    async def _get_session(self, token: str) -> KratosSession | None:
-        """Validate against Kratos; distinguish invalid auth from outages."""
+    async def _get_session(self, token: str) -> AccountsSession | None:
+        """Validate against Connhex Accounts; distinguish invalid auth from outages."""
         async with httpx.AsyncClient(timeout=PASSWORD_LOGIN_TIMEOUT) as client:
             response = await client.get(
                 f"{self.accounts_url}/auth/sessions/whoami",
@@ -646,4 +646,4 @@ class ConnhexOAuthProvider(OAuthProvider):
             or expires_at <= _now()
         ):
             return None
-        return KratosSession(session_id, identity_id, expires_at)
+        return AccountsSession(session_id, identity_id, expires_at)

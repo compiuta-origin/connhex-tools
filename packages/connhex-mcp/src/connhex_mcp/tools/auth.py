@@ -13,6 +13,6 @@ from connhex_mcp.mcp_instance import mcp
 async def whoami() -> dict:
     """
     Returns information about the currently authenticated user.
-    Use this to verify the connection and see user's identity (active Ory Kratos session).
+    Use this to verify the connection and see user's identity (active Connhex Accounts session).
     """
     return await get_connhex().iam.whoami()

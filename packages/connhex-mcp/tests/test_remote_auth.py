@@ -95,7 +95,7 @@ def remote_settings(tmp_path, monkeypatch):
         "CONNHEX_OAUTH_SESSION_ENCRYPTION_KEY", Fernet.generate_key().decode()
     )
     monkeypatch.setenv(
-        "CONNHEX_KRATOS_ADMIN_URL",
+        "CONNHEX_ACCOUNTS_ADMIN_URL",
         "http://account-admin.auth.svc.cluster.local",
     )
 
@@ -108,12 +108,24 @@ def remote_settings(tmp_path, monkeypatch):
             "oauth_session_encryption_key",
             "CONNHEX_OAUTH_SESSION_ENCRYPTION_KEY",
         ),
-        ("kratos_admin_url", "CONNHEX_KRATOS_ADMIN_URL"),
+        ("accounts_admin_url", "CONNHEX_ACCOUNTS_ADMIN_URL"),
     ],
 )
 def test_remote_requires_persistent_configuration(field, env):
     settings = make_settings().model_copy(update={field: None})
     with pytest.raises(ValueError, match=env):
+        ConnhexOAuthProvider(settings)
+
+
+def test_old_admin_environment_name_is_not_supported(monkeypatch):
+    monkeypatch.delenv("CONNHEX_ACCOUNTS_ADMIN_URL")
+    monkeypatch.setenv(
+        "CONNHEX_KRATOS_ADMIN_URL",
+        "http://account-admin.auth.svc.cluster.local",
+    )
+    settings = make_settings()
+    assert settings.accounts_admin_url is None
+    with pytest.raises(ValueError, match="CONNHEX_ACCOUNTS_ADMIN_URL"):
         ConnhexOAuthProvider(settings)
 
 
@@ -388,7 +400,7 @@ async def test_connection_survives_restart_encrypted(mock_http):
 
 
 @pytest.mark.asyncio
-async def test_unknown_token_never_reaches_kratos(mock_http):
+async def test_unknown_token_never_reaches_accounts(mock_http):
     provider = ConnhexOAuthProvider(make_settings())
 
     def unexpected(request):
@@ -549,9 +561,9 @@ def test_lifespan_checks_immediately_and_closes_task(monkeypatch, mock_http):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kratos_available", [True, False])
+@pytest.mark.parametrize("accounts_available", [True, False])
 async def test_oauth_revoke_persists_and_stops_extension(
-    mock_http, kratos_available
+    mock_http, accounts_available
 ):
     settings = make_settings()
     provider = ConnhexOAuthProvider(settings)
@@ -559,8 +571,8 @@ async def test_oauth_revoke_persists_and_stops_extension(
     add_connection(provider, remote._now() + 86400)
 
     def handler(request):
-        if not kratos_available:
-            raise AssertionError("Revocation must not depend on Kratos")
+        if not accounts_available:
+            raise AssertionError("Revocation must not depend on Accounts")
         return httpx.Response(200, json=session(remote._now() + 86400))
 
     mock_http(handler)
