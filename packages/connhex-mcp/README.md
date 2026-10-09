@@ -16,10 +16,13 @@ The remote MCP server handles authentication through your browser. When you
 first connect, your MCP client will prompt you to authenticate with your
 Connhex account.
 
-Remote deployments should persist dynamic OAuth client registrations so MCP
-clients can reuse their registered `client_id` after a pod restart or image
-update. Set `CONNHEX_OAUTH_CLIENT_STORE_PATH` to a SQLite file on a persistent
-volume, for example `/data/oauth-clients.sqlite`.
+Remote deployments should persist OAuth client registrations and encrypted
+Connhex sessions so MCP clients can reuse their connection after a server
+restart or image update. Set `CONNHEX_OAUTH_CLIENT_STORE_PATH` to a SQLite file
+on a persistent volume, for example `/data/oauth-clients.sqlite`, and provide
+a stable Fernet key through `CONNHEX_OAUTH_SESSION_ENCRYPTION_KEY`. Configure
+`CONNHEX_KRATOS_ADMIN_URL` with the Kratos admin endpoint for automatic session
+extension. Login credentials are not stored.
 
 | Deployment                     | MCP server URL                                                                   | Authentication                         |
 | ------------------------------ | -------------------------------------------------------------------------------- | -------------------------------------- |
@@ -165,12 +168,12 @@ Connhex API instance.
 Local authentication is inferred from the environment variables available to
 the `connhex-mcp` process:
 
-| Environment variables                                     | Description                                                                  |
-| --------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `CONNHEX_USERNAME`, `CONNHEX_PASSWORD`                    | Logs in with username and password, then caches the session token in memory. |
-| `CONNHEX_BEARER_TOKEN`                                    | Uses a static bearer token.                                                  |
-| `CONNHEX_SESSION_COOKIE`                                  | Uses a static `chx_auth_session` cookie value.                               |
-| Incoming `Authorization` header or `chx_auth_session` cookie | Used when the MCP transport forwards request headers.                     |
+| Environment variables                                        | Description                                                                  |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| `CONNHEX_USERNAME`, `CONNHEX_PASSWORD`                       | Logs in with username and password, then caches the session token in memory. |
+| `CONNHEX_BEARER_TOKEN`                                       | Uses a static bearer token.                                                  |
+| `CONNHEX_SESSION_COOKIE`                                     | Uses a static `chx_auth_session` cookie value.                               |
+| Incoming `Authorization` header or `chx_auth_session` cookie | Used when the MCP transport forwards request headers.                        |
 
 Session-cookie authentication is sent directly to Connhex as
 `Cookie: chx_auth_session=<value>`; it does not require a Kratos JWT token
@@ -253,11 +256,11 @@ Then restart your MCP client.
 
 ### IAM
 
-| Tool              | Description                                                               |
-| ----------------- | ------------------------------------------------------------------------- |
-| `whoami`          | Return information about the currently authenticated user.                |
+| Tool              | Description                                                                    |
+| ----------------- | ------------------------------------------------------------------------------ |
+| `whoami`          | Return information about the currently authenticated user.                     |
 | `list_identities` | List Connhex identities with exact email or username filtering and pagination. |
-| `get_identity`    | Read a Connhex identity by UUID.                                          |
+| `get_identity`    | Read a Connhex identity by UUID.                                               |
 
 `get_identity(identity_id)` and
 `list_identities(limit=10, offset=0, credentials_identifier=None)` are read-only

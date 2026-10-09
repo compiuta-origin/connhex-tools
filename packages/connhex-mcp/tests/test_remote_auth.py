@@ -1,16 +1,22 @@
+import base64
+import hashlib
 import logging
 import sqlite3
+from datetime import UTC, datetime
+from threading import Event
 
+import httpx
 import pytest
 from connhex.urls import DEFAULT_INSTANCE_URL
 from connhex_mcp.auth import remote
 from connhex_mcp.auth.remote import (
-    RENEWAL_IDLE_TTL,
     ConnhexOAuthProvider,
-    StoredCredentials,
 )
+from connhex_mcp.auth.store import OAuthConnection
 from connhex_mcp.config import MCPSettings
-from fastmcp.server.auth.auth import AccessToken
+from connhex_mcp.mcp_instance import mcp
+from cryptography.fernet import Fernet
+from fastmcp import FastMCP
 from mcp.shared.auth import OAuthClientInformationFull
 from starlette.applications import Starlette
 from starlette.testclient import TestClient
@@ -21,10 +27,14 @@ def make_settings(
     oauth_client_store_path: str | None = None,
 ) -> MCPSettings:
     return MCPSettings(
-        instance_url="https://compiuta.connhex.dev",
-        public_url="https://mcp.compiuta.connhex.dev",
+        instance_url="https://connhex.com",
+        public_url="https://mcp.connhex.com",
         openai_apps_challenge_token=openai_apps_challenge_token,
-        oauth_client_store_path=oauth_client_store_path,
+        **(
+            {"oauth_client_store_path": oauth_client_store_path}
+            if oauth_client_store_path is not None
+            else {}
+        ),
     )
 
 
@@ -76,14 +86,35 @@ def make_oauth_client(
     )
 
 
-@pytest.mark.asyncio
-async def test_register_client_uses_memory_when_store_path_is_unset():
-    provider = ConnhexOAuthProvider(make_settings())
-    client_info = make_oauth_client()
+@pytest.fixture(autouse=True)
+def remote_settings(tmp_path, monkeypatch):
+    monkeypatch.setenv(
+        "CONNHEX_OAUTH_CLIENT_STORE_PATH", str(tmp_path / "oauth.sqlite")
+    )
+    monkeypatch.setenv(
+        "CONNHEX_OAUTH_SESSION_ENCRYPTION_KEY", Fernet.generate_key().decode()
+    )
+    monkeypatch.setenv(
+        "CONNHEX_KRATOS_ADMIN_URL",
+        "http://account-admin.auth.svc.cluster.local",
+    )
 
-    await provider.register_client(client_info)
 
-    assert await provider.get_client("client-1") == client_info
+@pytest.mark.parametrize(
+    "field,env",
+    [
+        ("oauth_client_store_path", "CONNHEX_OAUTH_CLIENT_STORE_PATH"),
+        (
+            "oauth_session_encryption_key",
+            "CONNHEX_OAUTH_SESSION_ENCRYPTION_KEY",
+        ),
+        ("kratos_admin_url", "CONNHEX_KRATOS_ADMIN_URL"),
+    ],
+)
+def test_remote_requires_persistent_configuration(field, env):
+    settings = make_settings().model_copy(update={field: None})
+    with pytest.raises(ValueError, match=env):
+        ConnhexOAuthProvider(settings)
 
 
 @pytest.mark.asyncio
@@ -136,14 +167,14 @@ async def test_authorize_accepts_persisted_client_after_restart(tmp_path):
             "code_challenge": "challenge",
             "code_challenge_method": "S256",
             "state": "state-1",
-            "resource": "https://mcp.compiuta.connhex.dev/",
+            "resource": "https://mcp.connhex.com/",
         },
         follow_redirects=False,
     )
 
     assert response.status_code == 302
     assert response.headers["location"].startswith(
-        "https://mcp.compiuta.connhex.dev/oauth/login?flow_id="
+        "https://mcp.connhex.com/oauth/login?flow_id="
     )
 
 
@@ -165,7 +196,7 @@ def test_authorize_rejects_unknown_client(tmp_path):
             "code_challenge": "challenge",
             "code_challenge_method": "S256",
             "state": "state-1",
-            "resource": "https://mcp.compiuta.connhex.dev/",
+            "resource": "https://mcp.connhex.com/",
         },
     )
 
@@ -224,268 +255,515 @@ def test_sqlite_store_rejects_unusable_database_path(tmp_path):
         )
 
 
-@pytest.mark.asyncio
-async def test_sqlite_store_does_not_persist_user_credentials(tmp_path):
-    db_path = tmp_path / "oauth-clients.sqlite"
-    provider = ConnhexOAuthProvider(
-        make_settings(oauth_client_store_path=str(db_path))
-    )
-
-    add_renewal_record(
-        provider,
-        token="session-token",
-        identifier="private@example.com",
-        password="user-password",
-    )
-    await provider.register_client(make_oauth_client())
-
-    with sqlite3.connect(db_path) as conn:
-        rows = conn.execute("SELECT client_info FROM oauth_clients").fetchall()
-
-    stored_payload = "\n".join(row[0] for row in rows)
-    assert "private@example.com" not in stored_payload
-    assert "user-password" not in stored_payload
+SID = "7210257e-6dc0-4bbb-ba3d-8647be2c7ce9"
+IID = "7f86c740-c2d6-4e4f-83c1-a13838d2ab26"
+TOKEN = "ory_st_test_only"
 
 
-def add_renewal_record(
-    provider: ConnhexOAuthProvider,
-    token: str = "expired-token",
-    identifier: str = "user@example.com",
-    password: str = "secret",
-) -> str:
-    return provider._create_renewal_record(
-        token, StoredCredentials(identifier, password)
-    )
+def session(expiry, active=True):
+    return {
+        "id": SID,
+        "active": active,
+        "expires_at": datetime.fromtimestamp(expiry, UTC).isoformat(),
+        "identity": {"id": IID, "state": "active"},
+    }
 
 
-@pytest.mark.asyncio
-async def test_load_access_token_auto_renews_when_credentials_are_known(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    provider = ConnhexOAuthProvider(make_settings())
-    record_id = add_renewal_record(provider)
-    provider._renewal_records[record_id].client_id = "client-1"
-    provider._access_tokens["expired-token"] = AccessToken(
-        token="expired-token",
-        client_id="client-1",
-        scopes=[],
-        expires_at=10,
-    )
-
-    async def fake_get_session_ttl(token: str) -> int | None:
-        if token == "expired-token":
-            return None
-        if token == "renewed-token":
-            return 300
-        raise AssertionError(f"unexpected token: {token}")
-
-    async def fake_login(
-        instance_url: str, identifier: str, password: str
-    ) -> str:
-        assert instance_url == "https://compiuta.connhex.dev/"
-        assert identifier == "user@example.com"
-        assert password == "secret"
-        return "renewed-token"
-
-    monkeypatch.setattr(remote, "_now", lambda: 1000.0)
-    monkeypatch.setattr(provider, "_get_session_ttl", fake_get_session_ttl)
-    monkeypatch.setattr(remote, "password_login", fake_login)
-
-    token = await provider.load_access_token("expired-token")
-
-    assert token is not None
-    assert token.token == "renewed-token"
-    assert token.client_id == "client-1"
-    assert provider._token_forwarding["expired-token"] == "renewed-token"
-    assert provider._token_records["renewed-token"] == record_id
-    assert provider._renewal_records[record_id].current_token == "renewed-token"
-    assert provider._renewal_records[record_id].last_used_at == 1000.0
-    assert "expired-token" not in provider._access_tokens
-
-
-@pytest.mark.asyncio
-async def test_load_access_token_reuses_forwarded_token_after_renewal(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    provider = ConnhexOAuthProvider(make_settings())
-    record_id = add_renewal_record(provider)
-    provider._renewal_records[record_id].client_id = "client-1"
-    provider._access_tokens["expired-token"] = AccessToken(
-        token="expired-token",
-        client_id="client-1",
-        scopes=[],
-        expires_at=10,
-    )
-
-    ttl_calls: list[str] = []
-    login_calls: list[tuple[str, str, str]] = []
-    now = 1000.0
-
-    async def fake_get_session_ttl(token: str) -> int | None:
-        ttl_calls.append(token)
-        if token == "expired-token":
-            return None
-        if token == "renewed-token":
-            return 300
-        raise AssertionError(f"unexpected token: {token}")
-
-    async def fake_login(
-        instance_url: str, identifier: str, password: str
-    ) -> str:
-        login_calls.append((instance_url, identifier, password))
-        return "renewed-token"
-
-    monkeypatch.setattr(remote, "_now", lambda: now)
-    monkeypatch.setattr(provider, "_get_session_ttl", fake_get_session_ttl)
-    monkeypatch.setattr(remote, "password_login", fake_login)
-
-    first = await provider.load_access_token("expired-token")
-    second = await provider.load_access_token("expired-token")
-
-    assert first is not None
-    assert first.token == "renewed-token"
-    assert second is not None
-    assert second.token == "renewed-token"
-    assert second.client_id == "client-1"
-    assert provider._token_forwarding["expired-token"] == "renewed-token"
-    assert provider._token_records["expired-token"] == record_id
-    assert provider._token_records["renewed-token"] == record_id
-    assert provider._access_tokens["renewed-token"].token == "renewed-token"
-    assert login_calls == [
-        (
-            "https://compiuta.connhex.dev/",
-            "user@example.com",
-            "secret",
+def add_connection(provider, expiry=2000):
+    provider._store.put_connection(
+        OAuthConnection(
+            TOKEN,
+            SID,
+            IID,
+            "client-1",
+            expiry,
         )
-    ]
-    assert ttl_calls == ["expired-token", "renewed-token"]
+    )
+
+
+@pytest.fixture
+def mock_http(monkeypatch):
+    original = httpx.AsyncClient
+
+    def install(handler):
+        monkeypatch.setattr(
+            remote.httpx,
+            "AsyncClient",
+            lambda **kwargs: original(
+                transport=httpx.MockTransport(handler), **kwargs
+            ),
+        )
+
+    return install
 
 
 @pytest.mark.asyncio
-async def test_cleanup_keeps_renewal_state_after_token_expiry_until_idle_ttl(
-    monkeypatch: pytest.MonkeyPatch,
-):
+async def test_exchange_wire_response_omits_expiry_and_refresh(mock_http):
     provider = ConnhexOAuthProvider(make_settings())
-    record_id = add_renewal_record(provider)
-    provider._renewal_records[record_id].client_id = "client-1"
-    provider._renewal_records[record_id].last_used_at = 1000.0
-    provider._access_tokens["expired-token"] = AccessToken(
-        token="expired-token",
+    await provider.register_client(make_oauth_client())
+    verifier = "test-verifier"
+    challenge = (
+        base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest())
+        .decode()
+        .rstrip("=")
+    )
+    mock_http(
+        lambda request: httpx.Response(200, json=session(remote._now() + 86400))
+    )
+    from mcp.server.auth.provider import AuthorizationCode
+
+    code = AuthorizationCode(
+        code="code",
         client_id="client-1",
         scopes=[],
-        expires_at=1010,
+        expires_at=remote._now() + 300,
+        code_challenge=challenge,
+        redirect_uri="https://chatgpt.com/connector/oauth/test",
+        redirect_uri_provided_explicitly=True,
     )
+    provider._auth_codes["code"] = code
+    provider._code_tokens["code"] = TOKEN
+    with TestClient(Starlette(routes=provider.get_routes("/"))) as client:
+        response = client.post(
+            "/token",
+            data={
+                "grant_type": "authorization_code",
+                "client_id": "client-1",
+                "client_secret": "client-secret",
+                "code": "code",
+                "code_verifier": verifier,
+                "redirect_uri": "https://chatgpt.com/connector/oauth/test",
+            },
+        )
+    assert response.status_code == 200
+    assert response.json() == {"access_token": TOKEN, "token_type": "Bearer"}
+    assert provider._store.get_connection(TOKEN).session_id == SID
+    assert not provider._code_tokens
 
-    monkeypatch.setattr(remote, "_now", lambda: 1020.0)
+
+def test_metadata_and_dynamic_registration():
+    provider = ConnhexOAuthProvider(make_settings())
+    with TestClient(Starlette(routes=provider.get_routes("/"))) as client:
+        metadata = client.get("/.well-known/oauth-authorization-server").json()
+        assert metadata["grant_types_supported"] == ["authorization_code"]
+        assert metadata["revocation_endpoint"].endswith("/revoke")
+        response = client.post(
+            "/register",
+            json={
+                "redirect_uris": ["https://chatgpt.com/connector/oauth/test"],
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "token_endpoint_auth_method": "client_secret_post",
+            },
+        )
+    assert response.status_code == 201
+    assert response.json()["client_id"]
+
+
+@pytest.mark.asyncio
+async def test_connection_survives_restart_encrypted(mock_http):
+    settings = make_settings()
+    provider = ConnhexOAuthProvider(settings)
+    add_connection(provider, remote._now() + 86400)
+    mock_http(
+        lambda request: httpx.Response(200, json=session(remote._now() + 86400))
+    )
+    restarted = ConnhexOAuthProvider(settings)
+    token = await restarted.verify_token(TOKEN)
+    assert token.token == TOKEN
+    assert token.client_id == "client-1"
+    assert token.expires_at <= remote._now() + 60
+    with sqlite3.connect(settings.oauth_client_store_path) as conn:
+        payload = str(
+            conn.execute("SELECT * FROM oauth_connections").fetchall()
+        )
+    assert TOKEN not in payload
+    assert "password" not in payload
+    assert TOKEN not in repr(restarted._store.get_connection(TOKEN))
+    wrong_key = settings.model_copy(
+        update={"oauth_session_encryption_key": Fernet.generate_key().decode()}
+    )
+    with pytest.raises(ValueError, match="Unable to decrypt"):
+        ConnhexOAuthProvider(wrong_key)
+
+
+@pytest.mark.asyncio
+async def test_unknown_token_never_reaches_kratos(mock_http):
+    provider = ConnhexOAuthProvider(make_settings())
+
+    def unexpected(request):
+        raise AssertionError("Unknown tokens must be rejected locally")
+
+    mock_http(unexpected)
+    assert await provider.verify_token("old-unmanaged-token") is None
+
+
+@pytest.mark.asyncio
+async def test_validation_cache_is_bounded_and_detects_revocation(
+    monkeypatch, mock_http
+):
+    now = 1000
+    monkeypatch.setattr(remote, "_now", lambda: now)
+    provider = ConnhexOAuthProvider(make_settings())
+    add_connection(provider)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        return (
+            httpx.Response(200, json=session(2000))
+            if len(calls) == 1
+            else httpx.Response(401)
+        )
+
+    mock_http(handler)
+    assert await provider.verify_token(TOKEN)
+    now = 1059
+    assert await provider.verify_token(TOKEN)
+    assert len(calls) == 1
+    now = 1060
+    assert await provider.verify_token(TOKEN) is None
+    assert provider._store.get_connection(TOKEN).state == "invalid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "patch_status,advanced", [(200, True), (204, True), (200, False)]
+)
+async def test_preventive_extension_without_traffic(
+    monkeypatch, mock_http, patch_status, advanced
+):
+    monkeypatch.setattr(remote, "_now", lambda: 1000)
+    provider = ConnhexOAuthProvider(make_settings())
+    add_connection(provider)
+    calls = []
+    expiry = 2000
+
+    def handler(request):
+        nonlocal expiry
+        calls.append((request.method, str(request.url)))
+        if request.method == "PATCH":
+            assert (
+                str(request.url)
+                == f"http://account-admin.auth.svc.cluster.local/admin/sessions/{SID}/extend"
+            )
+            assert "authorization" not in request.headers
+            if advanced:
+                expiry = 87400
+            return httpx.Response(patch_status)
+        return httpx.Response(200, json=session(expiry))
+
+    mock_http(handler)
+    await provider._maintain_sessions()
+    assert [method for method, _ in calls] == ["GET", "PATCH", "GET"]
+    assert provider._store.get_connection(TOKEN).expires_at == expiry
+    assert provider._store.get_connection(TOKEN).state == "active"
+    assert not hasattr(provider, "_renewal_records")
+    calls.clear()
+    await provider._maintain_sessions()
+    assert len(calls) == (1 if advanced else 3)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status,body",
+    [
+        (401, None),
+        (200, session(999)),
+        (200, session(2000, False)),
+        (200, {**session(2000), "identity": {"id": IID, "state": "inactive"}}),
+        (200, {**session(2000), "id": "11111111-1111-1111-1111-111111111111"}),
+    ],
+)
+async def test_invalid_sessions_never_extended(
+    monkeypatch, mock_http, status, body
+):
+    monkeypatch.setattr(remote, "_now", lambda: 1000)
+    provider = ConnhexOAuthProvider(make_settings())
+    add_connection(provider)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        assert request.method == "GET"
+        return httpx.Response(status, json=body)
+
+    mock_http(handler)
+    await provider._maintain_sessions()
+    assert provider._store.get_connection(TOKEN).state == "invalid"
+    await provider._maintain_sessions()
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["whoami", "patch", "confirmation"])
+async def test_temporary_failures_retry_without_losing_state(
+    monkeypatch, mock_http, stage
+):
+    monkeypatch.setattr(remote, "_now", lambda: 1000)
+    provider = ConnhexOAuthProvider(make_settings())
+    add_connection(provider)
+    calls = []
+
+    def handler(request):
+        calls.append(request)
+        fail = (
+            stage == "whoami"
+            and len(calls) == 1
+            or stage == "patch"
+            and request.method == "PATCH"
+            or stage == "confirmation"
+            and len(calls) == 3
+        )
+        return (
+            httpx.Response(503)
+            if fail
+            else httpx.Response(200, json=session(2000))
+        )
+
+    mock_http(handler)
+    await provider._maintain_sessions()
+    assert provider._store.get_connection(TOKEN).state == "active"
+    mock_http(lambda request: httpx.Response(200, json=session(2000)))
+    await provider._maintain_sessions()
+    assert provider._store.get_connection(TOKEN).state == "active"
+
+
+def test_lifespan_checks_immediately_and_closes_task(monkeypatch, mock_http):
+    provider = ConnhexOAuthProvider(make_settings())
+    add_connection(provider, remote._now() + 86400)
+    checked = Event()
+
+    def handler(request):
+        checked.set()
+        return httpx.Response(200, json=session(remote._now() + 86400))
+
+    mock_http(handler)
+    monkeypatch.setattr(mcp, "auth", provider)
+    with TestClient(mcp.http_app(transport="streamable-http", path="/")):
+        assert checked.wait(timeout=2)
+        task = provider._maintenance_task
+        assert not task.done()
+    assert task.done()
+    assert provider._maintenance_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kratos_available", [True, False])
+async def test_oauth_revoke_persists_and_stops_extension(
+    mock_http, kratos_available
+):
+    settings = make_settings()
+    provider = ConnhexOAuthProvider(settings)
+    await provider.register_client(make_oauth_client())
+    add_connection(provider, remote._now() + 86400)
+
+    def handler(request):
+        if not kratos_available:
+            raise AssertionError("Revocation must not depend on Kratos")
+        return httpx.Response(200, json=session(remote._now() + 86400))
+
+    mock_http(handler)
+    with TestClient(Starlette(routes=provider.get_routes("/"))) as client:
+        response = client.post(
+            "/revoke",
+            data={
+                "token": TOKEN,
+                "client_id": "client-1",
+                "client_secret": "client-secret",
+                "token_type_hint": "access_token",
+            },
+        )
+    assert response.status_code == 200
+    restarted = ConnhexOAuthProvider(settings)
+    assert await restarted.verify_token(TOKEN) is None
+    assert not restarted._store.active_connections()
+
+
+@pytest.mark.asyncio
+async def test_cleanup_never_discards_idle_connections():
+    provider = ConnhexOAuthProvider(make_settings())
+    add_connection(provider, remote._now() + 86400)
     provider._cleanup_once()
+    assert len(provider._store.active_connections()) == 1
 
-    assert "expired-token" not in provider._access_tokens
-    assert record_id in provider._renewal_records
-    assert provider._token_records["expired-token"] == record_id
+
+@pytest.mark.parametrize(
+    "grants,expected",
+    [
+        (["authorization_code", "refresh_token"], 201),
+        (["refresh_token"], 400),
+        (["client_credentials"], 400),
+    ],
+)
+def test_registration_only_grants_authorization_code(grants, expected):
+    provider = ConnhexOAuthProvider(make_settings())
+    with TestClient(Starlette(routes=provider.get_routes("/"))) as client:
+        response = client.post(
+            "/register",
+            json={
+                "redirect_uris": ["https://chatgpt.com/connector/oauth/test"],
+                "grant_types": grants,
+                "response_types": ["code"],
+            },
+        )
+    assert response.status_code == expected
+    if expected == 201:
+        assert response.json()["grant_types"] == ["authorization_code"]
 
 
 @pytest.mark.asyncio
-async def test_cleanup_removes_idle_renewal_state(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_validation_outage_and_malformed_payload_are_not_revocations(
+    mock_http,
 ):
     provider = ConnhexOAuthProvider(make_settings())
-    record_id = add_renewal_record(provider, token="stale-token")
-    provider._renewal_records[record_id].client_id = "client-1"
-    provider._renewal_records[record_id].last_used_at = 1000.0
-    provider._token_forwarding["legacy-token"] = "stale-token"
-    provider._token_records["legacy-token"] = record_id
-    provider._access_tokens["stale-token"] = AccessToken(
-        token="stale-token",
-        client_id="client-1",
-        scopes=[],
-        expires_at=1100,
+    add_connection(provider, remote._now() + 86400)
+    for status, body in [(503, None), (200, {"unexpected": "payload"})]:
+        mock_http(lambda request: httpx.Response(status, json=body))
+        with pytest.raises(remote.AuthenticationError):
+            await provider.verify_token(TOKEN)
+        assert provider._store.get_connection(TOKEN).state == "active"
+    mock_http(
+        lambda request: httpx.Response(200, json=session(remote._now() + 86400))
     )
-
-    monkeypatch.setattr(remote, "_now", lambda: 1000.0 + RENEWAL_IDLE_TTL + 1)
-    provider._cleanup_once()
-
-    assert record_id not in provider._renewal_records
-    assert "stale-token" not in provider._token_records
-    assert "legacy-token" not in provider._token_records
-    assert "legacy-token" not in provider._token_forwarding
-    assert "stale-token" not in provider._access_tokens
+    assert await provider.verify_token(TOKEN)
 
 
-@pytest.mark.asyncio
-async def test_revoke_token_clears_local_renewal_state():
+def test_http_validation_outage_returns_503_not_invalid_token(mock_http):
     provider = ConnhexOAuthProvider(make_settings())
-    record_id = add_renewal_record(provider, token="live-token")
-    provider._renewal_records[record_id].client_id = "client-1"
-    provider._token_forwarding["old-token"] = "live-token"
-    provider._token_records["old-token"] = record_id
-    provider._access_tokens["live-token"] = AccessToken(
-        token="live-token",
-        client_id="client-1",
-        scopes=[],
-        expires_at=9999,
-    )
-
-    await provider.revoke_token("old-token")
-
-    assert record_id not in provider._renewal_records
-    assert "live-token" not in provider._token_records
-    assert "old-token" not in provider._token_records
-    assert "old-token" not in provider._token_forwarding
-    assert "live-token" not in provider._access_tokens
+    add_connection(provider, remote._now() + 86400)
+    mock_http(lambda request: httpx.Response(503))
+    server = FastMCP("auth-test", auth=provider)
+    with TestClient(server.http_app(path="/")) as client:
+        response = client.get("/", headers={"Authorization": f"Bearer {TOKEN}"})
+        assert response.status_code == 503
+        assert response.json() == {"error": "temporarily_unavailable"}
+        assert response.headers["Retry-After"] == "60"
+        assert "WWW-Authenticate" not in response.headers
+        assert provider._store.get_connection(TOKEN).state == "active"
+        response = client.get("/", headers={"Authorization": "Bearer unknown"})
+        assert response.status_code == 401
+        mock_http(
+            lambda request: httpx.Response(
+                200, json=session(remote._now() + 86400)
+            )
+        )
+        response = client.get(
+            "/.well-known/oauth-authorization-server",
+            headers={"Authorization": f"Bearer {TOKEN}"},
+        )
+        assert response.status_code == 200
 
 
 @pytest.mark.asyncio
-async def test_load_access_token_logs_warning_when_expired_token_has_no_credentials(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+async def test_unchanged_session_expiry_does_not_write_sqlite(
+    monkeypatch, mock_http
 ):
+    monkeypatch.setattr(remote, "_now", lambda: 1000)
     provider = ConnhexOAuthProvider(make_settings())
-    provider._access_tokens["expired-token"] = AccessToken(
-        token="expired-token",
-        client_id="client-1",
-        scopes=[],
-        expires_at=10,
-    )
+    add_connection(provider, 86400)
+    mock_http(lambda request: httpx.Response(200, json=session(86400)))
 
-    async def fake_get_session_ttl(token: str) -> int | None:
-        assert token == "expired-token"
-        return None
+    def unexpected_write(*args):
+        raise AssertionError("Unchanged expiry must not be written again")
 
-    monkeypatch.setattr(provider, "_get_session_ttl", fake_get_session_ttl)
-
-    with caplog.at_level(logging.WARNING, logger="connhex-mcp"):
-        token = await provider.load_access_token("expired-token")
-
-    assert token is None
-    assert "expired-token" not in provider._access_tokens
-    assert (
-        "Access token expired and no credentials available for renewal"
-        in caplog.text
-    )
+    monkeypatch.setattr(provider._store, "update_expiry", unexpected_write)
+    await provider._maintain_sessions()
+    assert await provider.verify_token(TOKEN)
 
 
 @pytest.mark.asyncio
-async def test_load_access_token_cannot_renew_token_from_previous_process(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+async def test_missing_session_during_extension_stops_maintenance(
+    monkeypatch, mock_http
 ):
-    original_provider = ConnhexOAuthProvider(make_settings())
-    add_renewal_record(original_provider, token="old-token")
-
-    restarted_provider = ConnhexOAuthProvider(make_settings())
-
-    async def fake_get_session_ttl(token: str) -> int | None:
-        assert token == "old-token"
-        return None
-
-    monkeypatch.setattr(
-        restarted_provider, "_get_session_ttl", fake_get_session_ttl
+    monkeypatch.setattr(remote, "_now", lambda: 1000)
+    provider = ConnhexOAuthProvider(make_settings())
+    add_connection(provider)
+    mock_http(
+        lambda request: (
+            httpx.Response(404)
+            if request.method == "PATCH"
+            else httpx.Response(200, json=session(2000))
+        )
     )
+    await provider._maintain_sessions()
+    assert provider._store.get_connection(TOKEN).state == "invalid"
 
-    with caplog.at_level(logging.WARNING, logger="connhex-mcp"):
-        token = await restarted_provider.load_access_token("old-token")
 
-    assert token is None
-    assert "old-token" not in restarted_provider._token_records
-    assert (
-        "Access token expired and no credentials available for renewal"
-        in caplog.text
+@pytest.mark.asyncio
+async def test_login_does_not_retain_credentials(mock_http):
+    provider = ConnhexOAuthProvider(make_settings())
+    oauth_client = make_oauth_client()
+    await provider.register_client(oauth_client)
+
+    def handler(request):
+        if request.method == "POST":
+            assert b"user-password" in request.content
+            return httpx.Response(200, json={"session_token": TOKEN})
+        return httpx.Response(
+            200,
+            json={
+                "ui": {
+                    "action": "https://accounts.compiuta.connhex.dev/auth/self-service/login"
+                },
+            },
+        )
+
+    mock_http(handler)
+    with TestClient(Starlette(routes=provider.get_routes("/"))) as client:
+        response = client.get(
+            "/authorize",
+            params={
+                "response_type": "code",
+                "client_id": "client-1",
+                "redirect_uri": "https://chatgpt.com/connector/oauth/test",
+                "code_challenge": "challenge",
+                "code_challenge_method": "S256",
+            },
+            follow_redirects=False,
+        )
+        from urllib.parse import urlparse, parse_qs
+
+        flow_id = parse_qs(urlparse(response.headers["location"]).query)[
+            "flow_id"
+        ][0]
+        response = client.post(
+            "/oauth/login",
+            data={
+                "flow_id": flow_id,
+                "identifier": "private@example.com",
+                "password": "user-password",
+            },
+            follow_redirects=False,
+        )
+    assert response.status_code == 302
+    assert not provider._pending_flows
+    assert "user-password" not in repr(provider.__dict__)
+    assert "private@example.com" not in repr(provider.__dict__)
+    with sqlite3.connect(provider.settings.oauth_client_store_path) as conn:
+        assert not conn.execute("SELECT * FROM oauth_connections").fetchall()
+        payload = str(conn.execute("SELECT * FROM oauth_clients").fetchall())
+    assert "user-password" not in payload
+    assert "private@example.com" not in payload
+
+
+@pytest.mark.asyncio
+async def test_another_client_cannot_revoke_connection(mock_http):
+    provider = ConnhexOAuthProvider(make_settings())
+    await provider.register_client(make_oauth_client("other-client"))
+    add_connection(provider, remote._now() + 86400)
+    mock_http(
+        lambda request: httpx.Response(200, json=session(remote._now() + 86400))
     )
+    with TestClient(Starlette(routes=provider.get_routes("/"))) as client:
+        response = client.post(
+            "/revoke",
+            data={
+                "token": TOKEN,
+                "client_id": "other-client",
+                "client_secret": "client-secret",
+                "token_type_hint": "access_token",
+            },
+        )
+    assert response.status_code == 200
+    assert provider._store.get_connection(TOKEN).state == "active"

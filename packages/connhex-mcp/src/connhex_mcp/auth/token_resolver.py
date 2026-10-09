@@ -28,7 +28,7 @@ def build_auth_provider(
     """Build a per-request authentication provider for this MCP server.
 
     Priority:
-      1. In remote mode, prefer the fastmcp-validated (auto-renewed) token.
+      1. In remote mode, prefer the fastmcp-validated managed session token.
       2. Bearer token from the incoming request's Authorization header.
       3. fastmcp-validated token (as fallback in local mode).
       4. Connhex session cookie from the incoming request.

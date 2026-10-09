@@ -39,7 +39,16 @@ class MCPSettings(BaseSettings):
     )
     oauth_client_store_path: str | None = Field(
         default=None,
-        description="SQLite path for persisted OAuth client registrations.",
+        description="SQLite path for OAuth clients and encrypted sessions.",
+    )
+    oauth_session_encryption_key: str | None = Field(
+        default=None,
+        repr=False,
+        description="Stable Fernet key for encrypted remote OAuth sessions.",
+    )
+    kratos_admin_url: HttpUrl | None = Field(
+        default=None,
+        description="Internal Kratos admin URL for preventive session extension.",
     )
     openai_apps_challenge_token: str | None = Field(
         default=None,
